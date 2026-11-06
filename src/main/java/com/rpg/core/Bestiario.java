@@ -62,6 +62,15 @@ public class Bestiario {
         return texto.toString();
     }
 
+    public Map<String, Integer> copiarDerrotados() {
+        return new LinkedHashMap<>(derrotados);
+    }
+
+    public void restaurarDerrotados(Map<String, Integer> conteos) {
+        derrotados.clear();
+        derrotados.putAll(conteos);
+    }
+
     public String resumenDerrotados() {
         if (derrotados.isEmpty()) {
             return "ninguno";

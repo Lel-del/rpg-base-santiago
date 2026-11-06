@@ -13,6 +13,10 @@ import com.rpg.exceptions.CapacidadExcedidaException;
 import com.rpg.items.Inventario;
 import com.rpg.items.Pocion;
 
+import com.rpg.concurrency.AutoGuardadoDaemon;
+import com.rpg.persistencia.ArchivosPartida;
+import com.rpg.persistencia.Partida;
+
 import java.util.List;
 import java.util.Random;
 
@@ -26,37 +30,77 @@ public class MotorJuego {
     private final RegistroCombate registro = new RegistroCombate();
     private final Arena arena = new Arena(registro, new Random());
     private final Bestiario bestiario = new Bestiario();
-    private final PerfilJugador perfil = new PerfilJugador();
-    private final Gremio gremio = new Gremio(NOMBRE_GREMIO);
+    private PerfilJugador perfil = new PerfilJugador();
+    private Gremio gremio = new Gremio(NOMBRE_GREMIO);
     private final TorneoManager torneo = new TorneoManager(arena, registro);
-    // TALLER ARCHIVOS: ultimoGuardado es solo el estado de la partida en memoria. Aqui (o en un metodo
-    // nuevo como cargarProgreso) iria la carga de una partida guardada en disco; llamala desde Main.
+    private final ArchivosPartida archivos = new ArchivosPartida();
     private String ultimoGuardado = "";
+    private Personaje heroe;
+    private Enemigo rival;
+    private boolean combateActivo;
 
     public MotorJuego(Consola consola) {
         this.consola = consola;
+        new AutoGuardadoDaemon(5000, this::autoGuardar).iniciar();
     }
 
     // ---- opciones del menu principal
 
     public void combateRapido() {
-        registro.limpiar();
-        Personaje jugador = crearJugador();
-        Enemigo enemigo = elegirEnemigo();
-        registro.agregar("%n=== %s vs %s ===", jugador.getNombre(), enemigo.getNombre());
-
-        boolean huyo = combatir(jugador, enemigo);
-
-        cerrarCombate(jugador, enemigo, huyo);
-        guardarProgreso();
+        Personaje jugador = heroe != null && (rival != null || heroe.estaVivo()) ? heroe : crearJugador();
+        Enemigo enemigo = rival != null ? rival : elegirEnemigo();
+        synchronized (this) {
+            if (rival == null) {
+                registro.limpiar();
+                registro.agregar("%n=== %s vs %s ===", jugador.getNombre(), enemigo.getNombre());
+            }
+            if (jugador.getGremio() != gremio) {
+                jugador.unirseAGremio(gremio);
+            }
+            heroe = jugador;
+            rival = enemigo;
+            combateActivo = true;
+        }
+        arena.prepararCombate(jugador, enemigo);
+        boolean huyo;
+        try {
+            huyo = combatir(jugador, enemigo);
+        } finally {
+            synchronized (this) {
+                arena.cerrarEfectos(jugador, enemigo);
+                combateActivo = false;
+            }
+        }
+        synchronized (this) {
+            cerrarCombate(jugador, enemigo, huyo);
+            rival = null;
+            archivos.guardarHistorial(registro.getTexto());
+            guardarProgreso();
+        }
     }
 
     public void jugarTorneo() {
         registro.limpiar();
-        Personaje campeon = torneo.jugarTorneo();
-        registro.agregar("%nCAMPEON DEL TORNEO: %s", campeon.getNombre());
-        perfil.desbloquearLogro("Campeon del Torneo");
-        guardarProgreso();
+        synchronized (this) {
+            combateActivo = true;
+        }
+        Personaje campeon;
+        try {
+            campeon = torneo.jugarTorneo();
+        } finally {
+            synchronized (this) {
+                combateActivo = false;
+            }
+        }
+        if (campeon == null) {
+            return;
+        }
+        synchronized (this) {
+            registro.agregar("%nCAMPEON DEL TORNEO: %s", campeon.getNombre());
+            perfil.desbloquearLogro("Campeon del Torneo");
+            archivos.guardarHistorial(registro.getTexto());
+            guardarProgreso();
+        }
     }
 
     public void mostrarBestiario() {
@@ -76,9 +120,7 @@ public class MotorJuego {
             default -> new Mago(nombre);
         };
         entregarKitInicial(jugador);
-        jugador.unirseAGremio(gremio);
-        System.out.printf("%s se une al gremio %s (%d miembros).%n",
-                jugador.getNombre(), gremio.getNombre(), gremio.getMiembros().size());
+
         return jugador;
     }
 
@@ -130,10 +172,16 @@ public class MotorJuego {
         int ronda = 1;
         while (jugador.estaVivo() && enemigo.estaVivo()) {
             registro.agregar("%n-- Ronda %d --", ronda);
-            if (arena.iniciarTurno(jugador) && turnoJugador(jugador, enemigo)) {
+            boolean puedeActuar;
+            synchronized (this) {
+                puedeActuar = arena.iniciarTurno(jugador);
+            }
+            if (puedeActuar && turnoJugador(jugador, enemigo)) {
                 return true;
             }
-            arena.turnoAutomatico(enemigo, jugador);
+            synchronized (this) {
+                arena.turnoAutomatico(enemigo, jugador);
+            }
             ronda++;
         }
         return false;
@@ -149,33 +197,44 @@ public class MotorJuego {
             registro.agregar(FormatoCombate.resumen(jugador));
             registro.agregar(FormatoCombate.resumen(enemigo));
             Accion accion = pedirAccion();
+            if (!jugador.estaVivo() || !enemigo.estaVivo()) {
+                return false;
+            }
             if (accion == Accion.HUIR) {
                 return true;
             }
             turnoGastado = switch (accion) {
                 case ATACAR -> {
-                    arena.atacar(jugador, enemigo);
+                    synchronized (this) {
+                        arena.atacar(jugador, enemigo);
+                    }
                     yield true;
                 }
-                case ESPECIAL -> arena.intentarEspecial(jugador, enemigo);
+                case ESPECIAL -> {
+                    synchronized (this) {
+                        yield arena.intentarEspecial(jugador, enemigo);
+                    }
+                }
+                case TIEMPO_AGOTADO -> {
+                    registro.agregar("Tiempo agotado. Pierdes el turno.");
+                    yield true;
+                }
                 case POCION -> usarPocion(jugador);
                 default -> {
                     mostrarEstado(jugador);
                     yield false;
                 }
             };
-        } while (!turnoGastado && enemigo.estaVivo());
+        } while (!turnoGastado && jugador.estaVivo() && enemigo.estaVivo());
         return false;
     }
 
-    /**
-     * Pide la accion al jugador y se queda esperando hasta que escriba algo.
-     */
     private Accion pedirAccion() {
-        // TALLER CONCURRENCIA: esta lectura bloquea el programa sin limite de tiempo.
-        // Aqui debe entrar el temporizador de turno con su callback.
         System.out.println("1. Atacar  2. Habilidad especial  3. Usar pocion  4. Ver estado  0. Huir");
-        int opcion = consola.leerEntero("Accion: ", 0, 4);
+        Integer opcion = consola.leerEnteroConTiempo("Accion (10 segundos): ", 0, 4, 10);
+        if (opcion == null) {
+            return Accion.TIEMPO_AGOTADO;
+        }
         return switch (opcion) {
             case 1 -> Accion.ATACAR;
             case 2 -> Accion.ESPECIAL;
@@ -195,11 +254,20 @@ public class MotorJuego {
         for (Pocion pocion : inventario) {
             System.out.printf("  %d. %s%n", numero++, pocion.getNombre());
         }
-        int eleccion = consola.leerEntero("Pocion (0 = cancelar): ", 0, inventario.tamanio());
+        Integer eleccion = consola.leerEnteroConTiempo("Pocion (0 = cancelar, 10 segundos): ",
+                0, inventario.tamanio(), 10);
+        if (eleccion == null) {
+            registro.agregar("Tiempo agotado. Pierdes el turno.");
+            return true;
+        }
         if (eleccion == 0) {
             return false;
         }
-        registro.agregar(jugador.usarPocion(inventario.quitar(eleccion - 1)));
+        synchronized (this) {
+            if (jugador.estaVivo()) {
+                registro.agregar(jugador.usarPocion(inventario.quitar(eleccion - 1)));
+            }
+        }
         return true;
     }
 
@@ -209,7 +277,7 @@ public class MotorJuego {
                 jugador.getArma() != null ? jugador.getArma().getNombre() : "ninguna",
                 jugador.getDefensa(), jugador.getInventario().tamanio());
         for (EstadoEfecto efecto : jugador.getEfectos()) {
-            System.out.printf("Efecto activo: %s (%d turnos)%n", efecto.getNombre(), efecto.getTurnosRestantes());
+            System.out.printf("Efecto activo: %s (%d pulsos)%n", efecto.getNombre(), efecto.getTurnosRestantes());
         }
     }
 
@@ -252,14 +320,13 @@ public class MotorJuego {
 
     // ---- guardado
 
-    /**
-     * Guarda las estadisticas en memoria (el texto queda en {@code ultimoGuardado}); aun no se escribe ningun
-     * archivo. Hoy solo se invoca al terminar una pelea.
-     */
-    public void guardarProgreso() {
-        // TALLER ARCHIVOS: ademas de dejar el texto en memoria, escribe la partida en disco (por ejemplo un
-        // .txt con BufferedWriter, y/o un .dat serializando el estado con ObjectOutputStream). Usa try-with-resources.
-        // TALLER CONCURRENCIA: este guardado es manual. Debera hacerse solo, de fondo, mientras se juega.
+    private synchronized void autoGuardar() {
+        if (combateActivo) {
+            guardarProgreso();
+        }
+    }
+
+    public synchronized void guardarProgreso() {
         StringBuilder contenido = new StringBuilder();
         contenido.append("=== PARTIDA RPG ===").append(System.lineSeparator());
         contenido.append("Victorias: ").append(perfil.getVictorias()).append(System.lineSeparator());
@@ -271,10 +338,46 @@ public class MotorJuego {
         contenido.append(System.lineSeparator()).append("--- Ultimo combate ---").append(System.lineSeparator());
         contenido.append(registro.getTexto());
         ultimoGuardado = contenido.toString();
-        System.out.println("[Progreso guardado en memoria]");
+        if (heroe != null) {
+            ultimoGuardado += System.lineSeparator() + FormatoCombate.resumen(heroe);
+        }
+        if (rival != null) {
+            ultimoGuardado += System.lineSeparator() + FormatoCombate.resumen(rival);
+        }
+        if (archivos.guardar(new Partida(perfil, gremio, heroe, rival, bestiario.copiarDerrotados(),
+                registro.getTexto()))) {
+            System.out.println("[Progreso guardado]");
+        }
     }
 
-    public String getUltimoGuardado() {
+    public synchronized void cargarProgreso() {
+        Partida partida = archivos.cargar();
+        if (partida != null) {
+            perfil = partida.perfil();
+            gremio = partida.gremio();
+            heroe = partida.heroe();
+            rival = partida.rival();
+            bestiario.restaurarDerrotados(partida.derrotados());
+            registro.restaurar(partida.historial());
+            System.out.println("Partida cargada. Elige Combate rapido para continuar.");
+        }
+    }
+
+    public void mostrarHistorial() {
+        archivos.mostrarHistorial();
+    }
+
+    public void inspeccionarArchivos() {
+        archivos.inspeccionar();
+    }
+
+    public void borrarPartida() {
+        if (consola.leerEntero("Borrar partida guardada? (1. Si, 0. No): ", 0, 1) == 1) {
+            archivos.borrarPartida();
+        }
+    }
+
+    public synchronized String getUltimoGuardado() {
         return ultimoGuardado;
     }
 }

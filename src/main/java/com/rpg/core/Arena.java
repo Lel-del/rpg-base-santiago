@@ -26,9 +26,6 @@ public class Arena {
     /** Procesa efectos y aturdimiento. @return true si el personaje puede actuar este turno */
     public boolean iniciarTurno(Personaje personaje) {
         personaje.alIniciarTurno();
-        for (String mensaje : personaje.procesarEfectos()) {
-            registro.agregar(mensaje);
-        }
         if (!personaje.estaVivo()) {
             registro.agregar("%s cae derrotado por sus efectos", personaje.getNombre());
             return false;
@@ -75,13 +72,35 @@ public class Arena {
         atacar(atacante, defensor);
     }
 
+    public void prepararCombate(Personaje a, Personaje b) {
+        a.iniciarEfectos(registro::agregar);
+        b.iniciarEfectos(registro::agregar);
+    }
+
+    public void cerrarEfectos(Personaje a, Personaje b) {
+        a.cancelarEfectos();
+        b.cancelarEfectos();
+    }
+
     /** Pelea hasta que uno cae (o se acaban las rondas). @return el ganador */
     public Personaje duelo(Personaje a, Personaje b) {
-        for (int ronda = 1; ronda <= MAXIMO_RONDAS && a.estaVivo() && b.estaVivo(); ronda++) {
-            registro.agregar("-- Ronda %d --", ronda);
-            turnoAutomatico(a, b);
-            turnoAutomatico(b, a);
+        prepararCombate(a, b);
+        try {
+            for (int ronda = 1; ronda <= MAXIMO_RONDAS && a.estaVivo() && b.estaVivo(); ronda++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                registro.agregar("-- Ronda %d --", ronda);
+                turnoAutomatico(a, b);
+                turnoAutomatico(b, a);
+                Thread.sleep(500);
+            }
+            return a.getVida() >= b.getVida() ? a : b;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            cerrarEfectos(a, b);
         }
-        return a.getVida() >= b.getVida() ? a : b;
     }
 }

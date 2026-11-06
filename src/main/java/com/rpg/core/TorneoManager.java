@@ -22,18 +22,41 @@ public class TorneoManager {
     public Personaje jugarTorneo() {
         List<Personaje> gladiadores = crearGladiadores().getMiembros();
 
-        // TALLER CONCURRENCIA: las dos semifinales se simulan una tras otra en el hilo principal.
-        // La final solo puede empezar cuando ambas hayan terminado.
-        Personaje finalista1 = simularSemifinal(gladiadores.get(0), gladiadores.get(1));
-        Personaje finalista2 = simularSemifinal(gladiadores.get(2), gladiadores.get(3));
+        Personaje[] ganadores = new Personaje[2];
+        Thread semifinalA = new Thread(() ->
+                ganadores[0] = simularSemifinal(gladiadores.get(0), gladiadores.get(1)), "semifinal-A");
+        Thread semifinalB = new Thread(() ->
+                ganadores[1] = simularSemifinal(gladiadores.get(2), gladiadores.get(3)), "semifinal-B");
 
-        return simularFinal(finalista1, finalista2);
+        mostrarEstados(semifinalA, semifinalB);
+        semifinalA.start();
+        semifinalB.start();
+        mostrarEstados(semifinalA, semifinalB);
+        try {
+            semifinalA.join();
+            semifinalB.join();
+        } catch (InterruptedException e) {
+            semifinalA.interrupt();
+            semifinalB.interrupt();
+            Thread.currentThread().interrupt();
+            registro.agregar("Torneo interrumpido.");
+            return null;
+        }
+        mostrarEstados(semifinalA, semifinalB);
+        return ganadores[0] == null || ganadores[1] == null ? null : simularFinal(ganadores[0], ganadores[1]);
+    }
+
+    // NEW antes de start, RUNNABLE al ejecutar, TIMED_WAITING al dormir y TERMINATED tras join.
+    private void mostrarEstados(Thread a, Thread b) {
+        registro.agregar("%s: %s | %s: %s", a.getName(), a.getState(), b.getName(), b.getState());
     }
 
     public Personaje simularSemifinal(Personaje a, Personaje b) {
         registro.agregar("=== SEMIFINAL: %s vs %s ===", a.getNombre(), b.getNombre());
         Personaje ganador = arena.duelo(a, b);
-        registro.agregar("Clasifica a la final: %s", ganador.getNombre());
+        if (ganador != null) {
+            registro.agregar("Clasifica a la final: %s", ganador.getNombre());
+        }
         return ganador;
     }
 

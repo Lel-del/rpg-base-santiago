@@ -6,5 +6,6 @@ public enum Accion {
     ESPECIAL,
     POCION,
     ESTADO,
+    TIEMPO_AGOTADO,
     HUIR
 }
