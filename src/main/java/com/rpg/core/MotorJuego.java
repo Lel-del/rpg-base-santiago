@@ -49,8 +49,17 @@ public class MotorJuego {
     public void combateRapido() {
         Personaje jugador = heroe != null && (rival != null || heroe.estaVivo()) ? heroe : crearJugador();
         Enemigo enemigo = rival != null ? rival : elegirEnemigo();
+        ejecutarCombateRapido(jugador, enemigo, rival != null);
+    }
+
+    public void combateRapido(Personaje jugador) {
+        entregarKitInicial(jugador);
+        ejecutarCombateRapido(jugador, elegirEnemigo(), false);
+    }
+
+    private void ejecutarCombateRapido(Personaje jugador, Enemigo enemigo, boolean reanudar) {
         synchronized (this) {
-            if (rival == null) {
+            if (!reanudar) {
                 registro.limpiar();
                 registro.agregar("%n=== %s vs %s ===", jugador.getNombre(), enemigo.getNombre());
             }
